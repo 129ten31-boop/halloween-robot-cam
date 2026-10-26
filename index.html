@@ -5,80 +5,90 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Robot Costume Camera</title>
 <style>
+* { box-sizing: border-box; }
 body {
-margin: 0;
-padding: 16px;
-background: #101820;
-color: white;
-font-family: sans-serif;
-text-align: center;
+margin: 0; padding: 16px;
+background: #0c131c; color: white;
+font-family: sans-serif; text-align: center;
 }
-h1 { font-size: 24px; }
-p { line-height: 1.6; }
+h1 { font-size: 25px; }
+p { line-height: 1.5; }
 button {
-padding: 12px 16px;
-margin: 5px;
-border: 0;
-border-radius: 10px;
-font-size: 16px;
-font-weight: bold;
+padding: 12px 16px; margin: 4px;
+border: 0; border-radius: 10px;
+font-size: 16px; font-weight: bold;
 }
-#start { background: #46d9e8; }
-#switch { background: #ddd; }
+#start { background: #45e4f1; }
+#switch { background: #e0e5eb; }
 #screen {
-width: 100%;
-max-width: 600px;
-border-radius: 12px;
-background: #222;
+display: block; width: 100%; max-width: 600px;
+margin: 14px auto; border-radius: 14px;
+background: #202b36;
 }
-#status { color: #9cf6ff; }
+#status { color: #80f5ff; }
 video { display: none; }
 </style>
 </head>
 <body>
 <h1>🤖 ROBOT COSTUME</h1>
 <p>全身を映してロボット変身！</p>
-
 <button id="start">カメラを起動</button>
 <button id="switch">外カメラに切り替え</button>
-
 <p id="status">カメラを起動してください</p>
-
 <video id="video" autoplay muted playsinline></video>
 <canvas id="screen"></canvas>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js"></script>
+<script type="module">
+import {
+FilesetResolver,
+PoseLandmarker
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22";
 
-<script>
 const video = document.getElementById("video");
 const canvas = document.getElementById("screen");
 const ctx = canvas.getContext("2d");
 const status = document.getElementById("status");
 
-const robotCanvas = document.createElement("canvas");
-const robotCtx = robotCanvas.getContext("2d");
-const maskCanvas = document.createElement("canvas");
-const maskCtx = maskCanvas.getContext("2d");
-
 let stream = null;
-let useBackCamera = true;
+let pose = null;
 let running = false;
-let busy = false;
-let segmenter = null;
+let backCamera = true;
+let lastTime = -1;
+let starting = false;
 
-async function startCamera() {
-try {
-if (stream) {
-stream.getTracks().forEach(track => track.stop());
+const MODEL =
+"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
+
+async function initPose() {
+if (pose) return;
+status.textContent = "全身追跡モデルを読み込み中…";
+
+const vision = await FilesetResolver.forVisionTasks(
+"https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm"
+);
+
+pose = await PoseLandmarker.createFromOptions(vision, {
+baseOptions: { modelAssetPath: MODEL },
+runningMode: "VIDEO",
+numPoses: 1,
+minPoseDetectionConfidence: 0.5,
+minPosePresenceConfidence: 0.5,
+minTrackingConfidence: 0.5
+});
 }
 
+async function startCamera() {
+if (starting) return;
+starting = true;
 running = false;
-busy = false;
+
+try {
+if (stream) stream.getTracks().forEach(t => t.stop());
 
 stream = await navigator.mediaDevices.getUserMedia({
 audio: false,
 video: {
-facingMode: useBackCamera ? "environment" : "user",
+facingMode: backCamera ? "environment" : "user",
 width: { ideal: 1280 },
 height: { ideal: 720 }
 }
@@ -86,205 +96,258 @@ height: { ideal: 720 }
 
 video.srcObject = stream;
 await video.play();
+await initPose();
 
-status.textContent = "カメラ準備中…";
-
-if (!segmenter) {
-segmenter = new SelfieSegmentation({
-locateFile: file =>
-"https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/" + file
-});
-
-segmenter.setOptions({
-modelSelection: 1
-});
-
-segmenter.onResults(drawRobot);
-}
-
+lastTime = -1;
 running = true;
-status.textContent = "全身をカメラに映してください";
-processFrame();
-
-} catch (err) {
+status.textContent = "全身を映してください";
+requestAnimationFrame(render);
+} catch (e) {
+console.error(e);
 status.textContent =
-"起動できませんでした。カメラの許可や通信を確認してください。";
-console.error(err);
+"起動できません。カメラの許可と通信を確認してください。";
+} finally {
+starting = false;
 }
 }
 
-async function processFrame() {
-if (!running) return;
-
-if (video.readyState >= 2 && !busy && segmenter) {
-busy = true;
-try {
-await segmenter.send({ image: video });
-} catch (err) {
-console.error(err);
-status.textContent = "画像処理に失敗しました";
-}
-busy = false;
+function point(lm, w, h) {
+return { x: lm.x * w, y: lm.y * h, v: lm.visibility ?? 1 };
 }
 
-if (running) requestAnimationFrame(processFrame);
+function visible(p) {
+return p && p.v > 0.35 &&
+Number.isFinite(p.x) && Number.isFinite(p.y);
 }
 
-function drawRobot(results) {
-const w = video.videoWidth;
-const h = video.videoHeight;
+function lineArmor(a, b, width, color = "#a9c2d4") {
+if (!visible(a) || !visible(b)) return;
 
-if (!w || !h) return;
+const dx = b.x - a.x, dy = b.y - a.y;
+const len = Math.hypot(dx, dy);
+if (len < 2) return;
 
-canvas.width = robotCanvas.width = maskCanvas.width = w;
-canvas.height = robotCanvas.height = maskCanvas.height = h;
+const nx = -dy / len * width / 2;
+const ny = dx / len * width / 2;
 
-// 元のカメラ映像を背景として表示
-ctx.drawImage(video, 0, 0, w, h);
+ctx.beginPath();
+ctx.moveTo(a.x + nx, a.y + ny);
+ctx.lineTo(b.x + nx, b.y + ny);
+ctx.lineTo(b.x - nx, b.y - ny);
+ctx.lineTo(a.x - nx, a.y - ny);
+ctx.closePath();
 
-// 人物のマスクを作る
-maskCtx.clearRect(0, 0, w, h);
-maskCtx.drawImage(results.segmentationMask, 0, 0, w, h);
+const g = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+g.addColorStop(0, "#40586a");
+g.addColorStop(0.35, color);
+g.addColorStop(0.65, "#e6f1fa");
+g.addColorStop(1, "#536d80");
 
-// 人物の範囲を調べる
-let pixels;
-try {
-pixels = maskCtx.getImageData(0, 0, w, h).data;
-} catch (err) {
-return;
+ctx.fillStyle = g;
+ctx.fill();
+ctx.strokeStyle = "#263b4c";
+ctx.lineWidth = 3;
+ctx.stroke();
+
+// 装甲の中心ライン
+ctx.beginPath();
+ctx.moveTo(a.x, a.y);
+ctx.lineTo(b.x, b.y);
+ctx.strokeStyle = "rgba(35,55,70,0.65)";
+ctx.lineWidth = 2;
+ctx.stroke();
 }
 
-let minX = w, minY = h, maxX = 0, maxY = 0;
-const step = 4 * 4;
+function joint(p, r) {
+if (!visible(p)) return;
 
-for (let i = 0; i < pixels.length; i += step) {
-if (pixels[i] > 100) {
-const pixel = i / 4;
-const x = pixel % w;
-const y = Math.floor(pixel / w);
+ctx.beginPath();
+ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+ctx.fillStyle = "#263b4c";
+ctx.fill();
+ctx.strokeStyle = "#5cefff";
+ctx.lineWidth = 3;
+ctx.stroke();
 
-minX = Math.min(minX, x);
-minY = Math.min(minY, y);
-maxX = Math.max(maxX, x);
-maxY = Math.max(maxY, y);
-}
-}
-
-if (maxX <= minX || maxY <= minY) return;
-
-const bw = maxX - minX;
-const bh = maxY - minY;
-
-// 人物の形に沿った金属色のロボット素材
-robotCtx.clearRect(0, 0, w, h);
-robotCtx.drawImage(results.segmentationMask, 0, 0, w, h);
-
-robotCtx.globalCompositeOperation = "source-in";
-
-const metal = robotCtx.createLinearGradient(minX, 0, maxX, 0);
-metal.addColorStop(0, "#465565");
-metal.addColorStop(0.25, "#d9e5ee");
-metal.addColorStop(0.5, "#758b9b");
-metal.addColorStop(0.75, "#edf6ff");
-metal.addColorStop(1, "#344454");
-
-robotCtx.fillStyle = metal;
-robotCtx.fillRect(0, 0, w, h);
-
-// 人物の輪郭内にロボットのパネル模様を描く
-robotCtx.globalCompositeOperation = "source-atop";
-robotCtx.lineWidth = Math.max(2, bw * 0.009);
-robotCtx.strokeStyle = "#263746";
-
-for (let y = minY + bh * 0.12; y < maxY; y += bh * 0.09) {
-robotCtx.beginPath();
-robotCtx.moveTo(minX, y);
-robotCtx.lineTo(maxX, y);
-robotCtx.stroke();
+ctx.beginPath();
+ctx.arc(p.x, p.y, r * 0.4, 0, Math.PI * 2);
+ctx.fillStyle = "#bdfaff";
+ctx.fill();
 }
 
-// 頭部のバイザー(小さめ）
-robotCtx.fillStyle = "#101d2b";
-robotCtx.fillRect(
-minX + bw * 0.32,
-minY + bh * 0.085,
-bw * 0.36,
-bh * 0.035
+function drawRobot(lm, w, h) {
+const p = i => point(lm[i], w, h);
+
+// MediaPipe body landmark indices
+const nose = p(0);
+const ls = p(11), rs = p(12);
+const le = p(13), re = p(14);
+const lw = p(15), rw = p(16);
+const lh = p(23), rh = p(24);
+const lk = p(25), rk = p(26);
+const la = p(27), ra = p(28);
+const lheel = p(29), rheel = p(30);
+
+if (!visible(ls) || !visible(rs) ||
+!visible(lh) || !visible(rh)) return false;
+
+const shoulderW = Math.hypot(ls.x-rs.x, ls.y-rs.y);
+const hipW = Math.hypot(lh.x-rh.x, lh.y-rh.y);
+const scale = Math.max(12, shoulderW);
+
+// 胴体：肩と腰を結ぶ独立した胸・腹部装甲
+const midS = { x:(ls.x+rs.x)/2, y:(ls.y+rs.y)/2, v:1 };
+const midH = { x:(lh.x+rh.x)/2, y:(lh.y+rh.y)/2, v:1 };
+const sx = Math.max(shoulderW * 0.13, 4);
+const hx = Math.max(hipW * 0.12, 4);
+
+ctx.beginPath();
+ctx.moveTo(ls.x - sx, ls.y);
+ctx.lineTo(rs.x + sx, rs.y);
+ctx.lineTo(rh.x + hx, rh.y);
+ctx.lineTo(lh.x - hx, lh.y);
+ctx.closePath();
+
+const bodyGrad = ctx.createLinearGradient(
+ls.x, midS.y, rs.x, midH.y
 );
+bodyGrad.addColorStop(0, "#43596b");
+bodyGrad.addColorStop(0.3, "#dbe8f2");
+bodyGrad.addColorStop(0.65, "#8199aa");
+bodyGrad.addColorStop(1, "#354b5d");
+ctx.fillStyle = bodyGrad;
+ctx.fill();
+ctx.strokeStyle = "#243747";
+ctx.lineWidth = 4;
+ctx.stroke();
 
-robotCtx.fillStyle = "#4df4ff";
-robotCtx.fillRect(
-minX + bw * 0.28,
-minY + bh * 0.09,
-bw * 0.44,
-bh * 0.018
-);
+// 胸の中央装甲。体幅に応じてサイズが変わる
+const chestTop = midS.y + (midH.y-midS.y)*0.12;
+const chestBottom = midS.y + (midH.y-midS.y)*0.53;
+const chestW = shoulderW * 0.56;
 
-// 胸の装甲パネル(小さめ）
-robotCtx.fillStyle = "#344858";
-robotCtx.fillRect(
-minX + bw * 0.34,
-minY + bh * 0.27,
-bw * 0.32,
-bh * 0.16
-);
-
-robotCtx.strokeStyle = "#56e9ff";
-robotCtx.lineWidth = Math.max(2, bw * 0.008);
-robotCtx.strokeRect(
-minX + bw * 0.36,
-minY + bh * 0.29,
-bw * 0.28,
-bh * 0.12
-);
+ctx.beginPath();
+ctx.moveTo(midS.x-chestW/2, chestTop);
+ctx.lineTo(midS.x+chestW/2, chestTop);
+ctx.lineTo(midS.x+chestW*0.42, chestBottom);
+ctx.lineTo(midS.x-chestW*0.42, chestBottom);
+ctx.closePath();
+ctx.fillStyle = "#304657";
+ctx.fill();
+ctx.strokeStyle = "#65edff";
+ctx.lineWidth = 3;
+ctx.stroke();
 
 // 胸の発光コア
-robotCtx.fillStyle = "#62f6ff";
-robotCtx.beginPath();
-robotCtx.arc(
-minX + bw * 0.5,
-minY + bh * 0.36,
-Math.max(5, bw * 0.035),
-0,
-Math.PI * 2
-);
-robotCtx.fill();
+ctx.beginPath();
+ctx.arc(midS.x, (chestTop+chestBottom)/2,
+Math.max(4, scale*0.075), 0, Math.PI*2);
+ctx.fillStyle = "#55efff";
+ctx.fill();
 
-// 関節風の丸いパーツ
-for (const [x, y] of [
-[0.2, 0.3], [0.8, 0.3],
-[0.28, 0.55], [0.72, 0.55],
-[0.38, 0.72], [0.62, 0.72]
-]) {
-robotCtx.beginPath();
-robotCtx.arc(
-minX + bw * x,
-minY + bh * y,
-Math.max(4, bw * 0.025),
-0,
-Math.PI * 2
+// 肩・腕・肘・前腕
+lineArmor(ls, le, scale*0.30);
+lineArmor(le, lw, scale*0.23, "#92a9ba");
+lineArmor(rs, re, scale*0.30);
+lineArmor(re, rw, scale*0.23, "#92a9ba");
+
+// 腰から膝、膝から足首
+lineArmor(lh, lk, scale*0.34);
+lineArmor(lk, la, scale*0.27, "#a4bacb");
+lineArmor(rh, rk, scale*0.34);
+lineArmor(rk, ra, scale*0.27, "#a4bacb");
+
+// 足首から足先
+if (visible(la) && visible(lheel)) lineArmor(la, lheel, scale*0.18);
+if (visible(ra) && visible(rheel)) lineArmor(ra, rheel, scale*0.18);
+
+// 関節のリング
+[
+[ls,scale*.16],[rs,scale*.16],
+[le,scale*.105],[re,scale*.105],
+[lw,scale*.09],[rw,scale*.09],
+[lh,scale*.13],[rh,scale*.13],
+[lk,scale*.12],[rk,scale*.12],
+[la,scale*.09],[ra,scale*.09]
+].forEach(([pt,r]) => joint(pt,r));
+
+// 頭部：鼻と肩の位置から大きさを推定
+if (visible(nose)) {
+const headR = shoulderW * 0.20;
+const headY = nose.y - headR*0.48;
+
+ctx.beginPath();
+ctx.ellipse(nose.x, headY, headR*0.78, headR, 0, 0, Math.PI*2);
+const headGrad = ctx.createLinearGradient(
+nose.x-headR, headY, nose.x+headR, headY
 );
-robotCtx.fillStyle = "#172735";
-robotCtx.fill();
-robotCtx.strokeStyle = "#8ff8ff";
-robotCtx.stroke();
+headGrad.addColorStop(0, "#455a6d");
+headGrad.addColorStop(0.5, "#dceaf5");
+headGrad.addColorStop(1, "#536b7e");
+ctx.fillStyle = headGrad;
+ctx.fill();
+ctx.strokeStyle = "#263b4c";
+ctx.lineWidth = 3;
+ctx.stroke();
+
+// バイザー
+ctx.fillStyle = "#102433";
+ctx.fillRect(
+nose.x-headR*0.68,
+headY-headR*0.12,
+headR*1.36,
+headR*0.32
+);
+ctx.fillStyle = "#55f2ff";
+ctx.fillRect(
+nose.x-headR*0.48,
+headY-headR*0.02,
+headR*0.96,
+headR*0.07
+);
 }
 
-robotCtx.globalCompositeOperation = "source-over";
+return true;
+}
 
-// ロボットをカメラ映像に重ねる
-ctx.drawImage(robotCanvas, 0, 0, w, h);
+function render() {
+if (!running) return;
+if (video.readyState >= 2 && video.currentTime !== lastTime) {
+lastTime = video.currentTime;
 
-status.textContent = "🤖 ロボット変身中";
+const w = video.videoWidth, h = video.videoHeight;
+if (w && h) {
+if (canvas.width !== w || canvas.height !== h) {
+canvas.width = w;
+canvas.height = h;
+}
+
+ctx.drawImage(video, 0, 0, w, h);
+
+try {
+const result = pose.detectForVideo(video, performance.now());
+const landmarks = result.landmarks?.[0];
+
+if (landmarks && drawRobot(landmarks, w, h)) {
+status.textContent = "🤖 全身追跡中";
+} else {
+status.textContent = "全身が映るようにカメラを調整してね";
+}
+} catch (e) {
+console.error(e);
+status.textContent = "追跡処理でエラーが発生しました";
+}
+}
+}
+requestAnimationFrame(render);
 }
 
 document.getElementById("start").addEventListener("click", startCamera);
-
 document.getElementById("switch").addEventListener("click", async () => {
-useBackCamera = !useBackCamera;
+backCamera = !backCamera;
 await startCamera();
 });
-
 </script>
 </body>
 </html>
+
