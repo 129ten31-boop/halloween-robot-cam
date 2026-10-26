@@ -1,45 +1,290 @@
-
 <!DOCTYPE html>
-
 <html lang="ja">
-
 <head>
-
 <meta charset="UTF-8">
-
-<meta name="viewport" content="width=device-width,initial-scale=1">
-
-<title>Halloween Robot Cam</title>
-
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Robot Costume Camera</title>
 <style>
+body {
+margin: 0;
+padding: 16px;
+background: #101820;
+color: white;
+font-family: sans-serif;
+text-align: center;
+}
+h1 { font-size: 24px; }
+p { line-height: 1.6; }
+button {
+padding: 12px 16px;
+margin: 5px;
+border: 0;
+border-radius: 10px;
+font-size: 16px;
+font-weight: bold;
+}
+#start { background: #46d9e8; }
+#switch { background: #ddd; }
+#screen {
+width: 100%;
+max-width: 600px;
+border-radius: 12px;
+background: #222;
+}
+#status { color: #9cf6ff; }
+video { display: none; }
+</style>
+</head>
+<body>
+<h1>🤖 ROBOT COSTUME</h1>
+<p>全身を映してロボット変身！</p>
 
-  body {
+<button id="start">カメラを起動</button>
+<button id="switch">外カメラに切り替え</button>
 
-    margin: 0; padding: 16px;
+<p id="status">カメラを起動してください</p>
 
-    background: #151521; color: white;
+<video id="video" autoplay muted playsinline></video>
+<canvas id="screen"></canvas>
 
-    font-family: system-ui, sans-serif;
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js"></script>
 
-    text-align: center;
+<script>
+const video = document.getElementById("video");
+const canvas = document.getElementById("screen");
+const ctx = canvas.getContext("2d");
+const status = document.getElementById("status");
 
-  }
+const robotCanvas = document.createElement("canvas");
+const robotCtx = robotCanvas.getContext("2d");
+const maskCanvas = document.createElement("canvas");
+const maskCtx = maskCanvas.getContext("2d");
 
-  h1 { color: #ffad42; font-size: 25px; }
+let stream = null;
+let useBackCamera = true;
+let running = false;
+let busy = false;
+let segmenter = null;
 
-  canvas {
+async function startCamera() {
+try {
+if (stream) {
+stream.getTracks().forEach(track => track.stop());
+}
 
-    display: block; width: 100%; max-width: 480px;
+running = false;
+busy = false;
 
-    margin: 14px auto; background: #242432;
+stream = await navigator.mediaDevices.getUserMedia({
+audio: false,
+video: {
+facingMode: useBackCamera ? "environment" : "user",
+width: { ideal: 1280 },
+height: { ideal: 720 }
+}
+});
 
-    border-radius: 12px;
+video.srcObject = stream;
+await video.play();
 
-  }
+status.textContent = "カメラ準備中…";
 
-  button, input {
+if (!segmenter) {
+segmenter = new SelfieSegmentation({
+locateFile: file =>
+"https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/" + file
+});
 
-    accent-color: #ffad42;
+segmenter.setOptions({
+modelSelection: 1
+});
 
-  }
- 
+segmenter.onResults(drawRobot);
+}
+
+running = true;
+status.textContent = "全身をカメラに映してください";
+processFrame();
+
+} catch (err) {
+status.textContent =
+"起動できませんでした。カメラの許可や通信を確認してください。";
+console.error(err);
+}
+}
+
+async function processFrame() {
+if (!running) return;
+
+if (video.readyState >= 2 && !busy && segmenter) {
+busy = true;
+try {
+await segmenter.send({ image: video });
+} catch (err) {
+console.error(err);
+status.textContent = "画像処理に失敗しました";
+}
+busy = false;
+}
+
+if (running) requestAnimationFrame(processFrame);
+}
+
+function drawRobot(results) {
+const w = video.videoWidth;
+const h = video.videoHeight;
+
+if (!w || !h) return;
+
+canvas.width = robotCanvas.width = maskCanvas.width = w;
+canvas.height = robotCanvas.height = maskCanvas.height = h;
+
+// 元のカメラ映像を背景として表示
+ctx.drawImage(video, 0, 0, w, h);
+
+// 人物のマスクを作る
+maskCtx.clearRect(0, 0, w, h);
+maskCtx.drawImage(results.segmentationMask, 0, 0, w, h);
+
+// 人物の範囲を調べる
+let pixels;
+try {
+pixels = maskCtx.getImageData(0, 0, w, h).data;
+} catch (err) {
+return;
+}
+
+let minX = w, minY = h, maxX = 0, maxY = 0;
+const step = 4 * 4;
+
+for (let i = 0; i < pixels.length; i += step) {
+if (pixels[i] > 100) {
+const pixel = i / 4;
+const x = pixel % w;
+const y = Math.floor(pixel / w);
+
+minX = Math.min(minX, x);
+minY = Math.min(minY, y);
+maxX = Math.max(maxX, x);
+maxY = Math.max(maxY, y);
+}
+}
+
+if (maxX <= minX || maxY <= minY) return;
+
+const bw = maxX - minX;
+const bh = maxY - minY;
+
+// 人物の形に沿った金属色のロボット素材
+robotCtx.clearRect(0, 0, w, h);
+robotCtx.drawImage(results.segmentationMask, 0, 0, w, h);
+
+robotCtx.globalCompositeOperation = "source-in";
+
+const metal = robotCtx.createLinearGradient(minX, 0, maxX, 0);
+metal.addColorStop(0, "#465565");
+metal.addColorStop(0.25, "#d9e5ee");
+metal.addColorStop(0.5, "#758b9b");
+metal.addColorStop(0.75, "#edf6ff");
+metal.addColorStop(1, "#344454");
+
+robotCtx.fillStyle = metal;
+robotCtx.fillRect(0, 0, w, h);
+
+// 人物の輪郭内にロボットのパネル模様を描く
+robotCtx.globalCompositeOperation = "source-atop";
+robotCtx.lineWidth = Math.max(2, bw * 0.009);
+robotCtx.strokeStyle = "#263746";
+
+for (let y = minY + bh * 0.12; y < maxY; y += bh * 0.09) {
+robotCtx.beginPath();
+robotCtx.moveTo(minX, y);
+robotCtx.lineTo(maxX, y);
+robotCtx.stroke();
+}
+
+// 頭部のバイザー
+robotCtx.fillStyle = "#101d2b";
+robotCtx.fillRect(
+minX + bw * 0.2,
+minY + bh * 0.08,
+bw * 0.6,
+bh * 0.045
+);
+
+robotCtx.fillStyle = "#4df4ff";
+robotCtx.fillRect(
+minX + bw * 0.28,
+minY + bh * 0.09,
+bw * 0.44,
+bh * 0.018
+);
+
+// 胸の装甲パネル
+robotCtx.fillStyle = "#344858";
+robotCtx.fillRect(
+minX + bw * 0.25,
+minY + bh * 0.25,
+bw * 0.5,
+bh * 0.22
+);
+
+robotCtx.strokeStyle = "#56e9ff";
+robotCtx.lineWidth = Math.max(2, bw * 0.008);
+robotCtx.strokeRect(
+minX + bw * 0.28,
+minY + bh * 0.28,
+bw * 0.44,
+bh * 0.16
+);
+
+// 胸の発光コア
+robotCtx.fillStyle = "#62f6ff";
+robotCtx.beginPath();
+robotCtx.arc(
+minX + bw * 0.5,
+minY + bh * 0.36,
+Math.max(5, bw * 0.035),
+0,
+Math.PI * 2
+);
+robotCtx.fill();
+
+// 関節風の丸いパーツ
+for (const [x, y] of [
+[0.2, 0.3], [0.8, 0.3],
+[0.28, 0.55], [0.72, 0.55],
+[0.38, 0.72], [0.62, 0.72]
+]) {
+robotCtx.beginPath();
+robotCtx.arc(
+minX + bw * x,
+minY + bh * y,
+Math.max(4, bw * 0.025),
+0,
+Math.PI * 2
+);
+robotCtx.fillStyle = "#172735";
+robotCtx.fill();
+robotCtx.strokeStyle = "#8ff8ff";
+robotCtx.stroke();
+}
+
+robotCtx.globalCompositeOperation = "source-over";
+
+// ロボットをカメラ映像に重ねる
+ctx.drawImage(robotCanvas, 0, 0, w, h);
+
+status.textContent = "🤖 ロボット変身中";
+}
+
+document.getElementById("start").addEventListener("click", startCamera);
+
+document.getElementById("switch").addEventListener("click", async () => {
+useBackCamera = !useBackCamera;
+await startCamera();
+});
+
+</script>
+</body>
+</html>
