@@ -203,13 +203,13 @@ robotCtx.lineTo(maxX, y);
 robotCtx.stroke();
 }
 
-// 頭部のバイザー
+// 頭部のバイザー(小さめ）
 robotCtx.fillStyle = "#101d2b";
 robotCtx.fillRect(
-minX + bw * 0.2,
-minY + bh * 0.08,
-bw * 0.6,
-bh * 0.045
+minX + bw * 0.32,
+minY + bh * 0.085,
+bw * 0.36,
+bh * 0.035
 );
 
 robotCtx.fillStyle = "#4df4ff";
@@ -220,22 +220,22 @@ bw * 0.44,
 bh * 0.018
 );
 
-// 胸の装甲パネル
+// 胸の装甲パネル(小さめ）
 robotCtx.fillStyle = "#344858";
 robotCtx.fillRect(
-minX + bw * 0.25,
-minY + bh * 0.25,
-bw * 0.5,
-bh * 0.22
+minX + bw * 0.34,
+minY + bh * 0.27,
+bw * 0.32,
+bh * 0.16
 );
 
 robotCtx.strokeStyle = "#56e9ff";
 robotCtx.lineWidth = Math.max(2, bw * 0.008);
 robotCtx.strokeRect(
-minX + bw * 0.28,
-minY + bh * 0.28,
-bw * 0.44,
-bh * 0.16
+minX + bw * 0.36,
+minY + bh * 0.29,
+bw * 0.28,
+bh * 0.12
 );
 
 // 胸の発光コア
