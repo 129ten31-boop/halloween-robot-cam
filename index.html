@@ -2,39 +2,42 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Robot Costume Camera</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#10131b">
+<title>Skeleton Costume Camera</title>
 <style>
 * { box-sizing: border-box; }
 body {
 margin: 0; padding: 16px;
-background: #0c131c; color: white;
+background: #10131b; color: white;
 font-family: sans-serif; text-align: center;
 }
-h1 { font-size: 25px; }
+h1 { font-size: 23px; }
 p { line-height: 1.5; }
 button {
-padding: 12px 16px; margin: 4px;
+padding: 13px 16px; margin: 4px;
 border: 0; border-radius: 10px;
 font-size: 16px; font-weight: bold;
 }
-#start { background: #45e4f1; }
-#switch { background: #e0e5eb; }
+#start { background: #e6f2ff; color: #111; }
+#switch { background: #444d5b; color: white; }
 #screen {
 display: block; width: 100%; max-width: 600px;
-margin: 14px auto; border-radius: 14px;
-background: #202b36;
+height: auto; margin: 14px auto;
+border-radius: 14px; background: #202b36;
 }
-#status { color: #80f5ff; }
+#status { color: #bcecff; font-size: 14px; }
 video { display: none; }
 </style>
 </head>
 <body>
-<h1>🤖 ROBOT COSTUME</h1>
-<p>全身を映してロボット変身！</p>
+<h1>💀 SKELETON COSTUME</h1>
+<p>緑タイツを骸骨風に変身！<br>
+全身を映して、明るい場所で使ってね。</p>
 <button id="start">カメラを起動</button>
-<button id="switch">外カメラに切り替え</button>
+<button id="switch">外・内カメラ切替</button>
 <p id="status">カメラを起動してください</p>
+
 <video id="video" autoplay muted playsinline></video>
 <canvas id="screen"></canvas>
 
@@ -42,26 +45,35 @@ video { display: none; }
 import {
 FilesetResolver,
 PoseLandmarker
-} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/bundle.mjs";
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22";
 
 const video = document.getElementById("video");
 const canvas = document.getElementById("screen");
-const ctx = canvas.getContext("2d");
+const ctx = canvas.getContext("2d", { alpha: false });
 const status = document.getElementById("status");
+
+const maskCanvas = document.createElement("canvas");
+const maskCtx = maskCanvas.getContext("2d", {
+willReadFrequently: true
+});
+const boneCanvas = document.createElement("canvas");
+const boneCtx = boneCanvas.getContext("2d");
 
 let stream = null;
 let pose = null;
 let running = false;
+let starting = false;
 let backCamera = true;
 let lastTime = -1;
-let starting = false;
+let busy = false;
 
 const MODEL =
 "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task";
 
 async function initPose() {
 if (pose) return;
-status.textContent = "全身追跡モデルを読み込み中…";
+
+status.textContent = "全身認識モデルを読み込み中…";
 
 const vision = await FilesetResolver.forVisionTasks(
 "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22/wasm"
@@ -83,13 +95,20 @@ starting = true;
 running = false;
 
 try {
-if (stream) stream.getTracks().forEach(t => t.stop());
+if (!navigator.mediaDevices?.getUserMedia) {
+throw new Error("Camera API unavailable");
+}
+
+if (stream) {
+stream.getTracks().forEach(t => t.stop());
+stream = null;
+}
 
 stream = await navigator.mediaDevices.getUserMedia({
 audio: false,
 video: {
 facingMode: backCamera ? "environment" : "user",
-width: { ideal: 1280 },
+width: { ideal: 960 },
 height: { ideal: 720 }
 }
 });
@@ -100,85 +119,145 @@ await initPose();
 
 lastTime = -1;
 running = true;
-status.textContent = "全身を映してください";
+status.textContent = "全身と緑タイツを映してください";
 requestAnimationFrame(render);
 } catch (e) {
 console.error(e);
 status.textContent =
-"起動できません。カメラの許可と通信を確認してください。";
+"起動できません。Safariのカメラ許可と通信を確認してください。";
+if (stream) stream.getTracks().forEach(t => t.stop());
+stream = null;
 } finally {
 starting = false;
 }
 }
 
+function setupCanvas(w, h) {
+for (const c of [canvas, maskCanvas, boneCanvas]) {
+if (c.width !== w || c.height !== h) {
+c.width = w;
+c.height = h;
+}
+}
+}
+
+/*
+* 緑色のピクセルだけをマスクにする。
+* 照明やタイツの色によって検出精度は変わります。
+*/
+function makeGreenMask(w, h) {
+maskCtx.clearRect(0, 0, w, h);
+maskCtx.drawImage(video, 0, 0, w, h);
+
+const frame = maskCtx.getImageData(0, 0, w, h);
+const d = frame.data;
+
+for (let i = 0; i < d.length; i += 4) {
+const r = d[i], g = d[i + 1], b = d[i + 2];
+
+// 緑優勢の色を検出
+const isGreen =
+g > 55 &&
+g > r * 1.22 &&
+g > b * 1.12 &&
+(g - Math.max(r, b)) > 20;
+
+d[i] = 255;
+d[i + 1] = 255;
+d[i + 2] = 255;
+d[i + 3] = isGreen ? 255 : 0;
+}
+
+maskCtx.putImageData(frame, 0, 0);
+}
+
 function point(lm, w, h) {
-return { x: lm.x * w, y: lm.y * h, v: lm.visibility ?? 1 };
+return {
+x: lm.x * w,
+y: lm.y * h,
+v: lm.visibility ?? 1
+};
 }
 
 function visible(p) {
 return p && p.v > 0.35 &&
-Number.isFinite(p.x) && Number.isFinite(p.y);
+Number.isFinite(p.x) &&
+Number.isFinite(p.y);
 }
 
-function lineArmor(a, b, width, color = "#a9c2d4") {
+/*
+* 骨を描く。実際に表示するのは緑タイツ部分に
+* 重なった部分だけです。
+*/
+function bone(a, b, width) {
 if (!visible(a) || !visible(b)) return;
 
-const dx = b.x - a.x, dy = b.y - a.y;
+const dx = b.x - a.x;
+const dy = b.y - a.y;
 const len = Math.hypot(dx, dy);
-if (len < 2) return;
+if (len < 3) return;
 
-const nx = -dy / len * width / 2;
-const ny = dx / len * width / 2;
+boneCtx.lineCap = "round";
+boneCtx.lineJoin = "round";
 
-ctx.beginPath();
-ctx.moveTo(a.x + nx, a.y + ny);
-ctx.lineTo(b.x + nx, b.y + ny);
-ctx.lineTo(b.x - nx, b.y - ny);
-ctx.lineTo(a.x - nx, a.y - ny);
-ctx.closePath();
+// 骨の外側の輪郭
+boneCtx.beginPath();
+boneCtx.moveTo(a.x, a.y);
+boneCtx.lineTo(b.x, b.y);
+boneCtx.strokeStyle = "#342d28";
+boneCtx.lineWidth = width;
+boneCtx.stroke();
 
-const g = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
-g.addColorStop(0, "#40586a");
-g.addColorStop(0.35, color);
-g.addColorStop(0.65, "#e6f1fa");
-g.addColorStop(1, "#536d80");
+// 骨の中心
+boneCtx.beginPath();
+boneCtx.moveTo(a.x, a.y);
+boneCtx.lineTo(b.x, b.y);
+boneCtx.strokeStyle = "#f5edda";
+boneCtx.lineWidth = width * 0.70;
+boneCtx.stroke();
 
-ctx.fillStyle = g;
-ctx.fill();
-ctx.strokeStyle = "#263b4c";
-ctx.lineWidth = 3;
-ctx.stroke();
-
-// 装甲の中心ライン
-ctx.beginPath();
-ctx.moveTo(a.x, a.y);
-ctx.lineTo(b.x, b.y);
-ctx.strokeStyle = "rgba(35,55,70,0.65)";
-ctx.lineWidth = 2;
-ctx.stroke();
+// 骨の端のふくらみ
+for (const p of [a, b]) {
+boneCtx.beginPath();
+boneCtx.arc(p.x, p.y, width * 0.40, 0, Math.PI * 2);
+boneCtx.fillStyle = "#f5edda";
+boneCtx.fill();
+boneCtx.strokeStyle = "#342d28";
+boneCtx.lineWidth = Math.max(1, width * 0.10);
+boneCtx.stroke();
 }
 
-function joint(p, r) {
-if (!visible(p)) return;
-
-ctx.beginPath();
-ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-ctx.fillStyle = "#263b4c";
-ctx.fill();
-ctx.strokeStyle = "#5cefff";
-ctx.lineWidth = 3;
-ctx.stroke();
-
-ctx.beginPath();
-ctx.arc(p.x, p.y, r * 0.4, 0, Math.PI * 2);
-ctx.fillStyle = "#bdfaff";
-ctx.fill();
+// 骨の内部の陰影
+boneCtx.beginPath();
+boneCtx.moveTo(a.x, a.y);
+boneCtx.lineTo(b.x, b.y);
+boneCtx.strokeStyle = "rgba(125,105,83,0.5)";
+boneCtx.lineWidth = Math.max(1, width * 0.10);
+boneCtx.stroke();
 }
 
-function drawRobot(lm, w, h) {
+function rib(a, b, midX, midY, width) {
+if (!visible(a) || !visible(b)) return;
+
+boneCtx.beginPath();
+boneCtx.moveTo(a.x, a.y);
+boneCtx.quadraticCurveTo(midX, midY, b.x, b.y);
+boneCtx.lineCap = "round";
+boneCtx.strokeStyle = "#342d28";
+boneCtx.lineWidth = width;
+boneCtx.stroke();
+
+boneCtx.beginPath();
+boneCtx.moveTo(a.x, a.y);
+boneCtx.quadraticCurveTo(midX, midY, b.x, b.y);
+boneCtx.strokeStyle = "#f5edda";
+boneCtx.lineWidth = width * 0.68;
+boneCtx.stroke();
+}
+
+function drawSkeleton(lm, w, h) {
 const p = i => point(lm[i], w, h);
 
-// MediaPipe body landmark indices
 const nose = p(0);
 const ls = p(11), rs = p(12);
 const le = p(13), re = p(14);
@@ -187,165 +266,150 @@ const lh = p(23), rh = p(24);
 const lk = p(25), rk = p(26);
 const la = p(27), ra = p(28);
 const lheel = p(29), rheel = p(30);
+const lfoot = p(31), rfoot = p(32);
 
 if (!visible(ls) || !visible(rs) ||
 !visible(lh) || !visible(rh)) return false;
 
 const shoulderW = Math.hypot(ls.x-rs.x, ls.y-rs.y);
-const hipW = Math.hypot(lh.x-rh.x, lh.y-rh.y);
 const scale = Math.max(12, shoulderW);
 
-// 胴体：肩と腰を結ぶ独立した胸・腹部装甲
-const midS = { x:(ls.x+rs.x)/2, y:(ls.y+rs.y)/2, v:1 };
-const midH = { x:(lh.x+rh.x)/2, y:(lh.y+rh.y)/2, v:1 };
-const sx = Math.max(shoulderW * 0.13, 4);
-const hx = Math.max(hipW * 0.12, 4);
+// 胴体の中心
+const midS = {
+x: (ls.x + rs.x) / 2,
+y: (ls.y + rs.y) / 2,
+v: 1
+};
+const midH = {
+x: (lh.x + rh.x) / 2,
+y: (lh.y + rh.y) / 2,
+v: 1
+};
 
-ctx.beginPath();
-ctx.moveTo(ls.x - sx, ls.y);
-ctx.lineTo(rs.x + sx, rs.y);
-ctx.lineTo(rh.x + hx, rh.y);
-ctx.lineTo(lh.x - hx, lh.y);
-ctx.closePath();
+boneCtx.clearRect(0, 0, w, h);
 
-const bodyGrad = ctx.createLinearGradient(
-ls.x, midS.y, rs.x, midH.y
-);
-bodyGrad.addColorStop(0, "#43596b");
-bodyGrad.addColorStop(0.3, "#dbe8f2");
-bodyGrad.addColorStop(0.65, "#8199aa");
-bodyGrad.addColorStop(1, "#354b5d");
-ctx.fillStyle = bodyGrad;
-ctx.fill();
-ctx.strokeStyle = "#243747";
-ctx.lineWidth = 4;
-ctx.stroke();
+// 鎖骨
+bone(ls, rs, scale * 0.085);
 
-// 胸の中央装甲。体幅に応じてサイズが変わる
-const chestTop = midS.y + (midH.y-midS.y)*0.12;
-const chestBottom = midS.y + (midH.y-midS.y)*0.53;
-const chestW = shoulderW * 0.56;
+// 胸骨
+const sternumTop = {
+x: midS.x,
+y: midS.y + scale * 0.06,
+v: 1
+};
+const sternumBottom = {
+x: midH.x,
+y: midS.y + (midH.y-midS.y) * 0.50,
+v: 1
+};
+bone(sternumTop, sternumBottom, scale * 0.10);
 
-ctx.beginPath();
-ctx.moveTo(midS.x-chestW/2, chestTop);
-ctx.lineTo(midS.x+chestW/2, chestTop);
-ctx.lineTo(midS.x+chestW*0.42, chestBottom);
-ctx.lineTo(midS.x-chestW*0.42, chestBottom);
-ctx.closePath();
-ctx.fillStyle = "#304657";
-ctx.fill();
-ctx.strokeStyle = "#65edff";
-ctx.lineWidth = 3;
-ctx.stroke();
-
-// 胸の発光コア
-ctx.beginPath();
-ctx.arc(midS.x, (chestTop+chestBottom)/2,
-Math.max(4, scale*0.075), 0, Math.PI*2);
-ctx.fillStyle = "#55efff";
-ctx.fill();
-
-// 肩・腕・肘・前腕
-lineArmor(ls, le, scale*0.30);
-lineArmor(le, lw, scale*0.23, "#92a9ba");
-lineArmor(rs, re, scale*0.30);
-lineArmor(re, rw, scale*0.23, "#92a9ba");
-
-// 腰から膝、膝から足首
-lineArmor(lh, lk, scale*0.34);
-lineArmor(lk, la, scale*0.27, "#a4bacb");
-lineArmor(rh, rk, scale*0.34);
-lineArmor(rk, ra, scale*0.27, "#a4bacb");
-
-// 足首から足先
-if (visible(la) && visible(lheel)) lineArmor(la, lheel, scale*0.18);
-if (visible(ra) && visible(rheel)) lineArmor(ra, rheel, scale*0.18);
-
-// 関節のリング
-[
-[ls,scale*.16],[rs,scale*.16],
-[le,scale*.105],[re,scale*.105],
-[lw,scale*.09],[rw,scale*.09],
-[lh,scale*.13],[rh,scale*.13],
-[lk,scale*.12],[rk,scale*.12],
-[la,scale*.09],[ra,scale*.09]
-].forEach(([pt,r]) => joint(pt,r));
-
-// 頭部：鼻と肩の位置から大きさを推定
-if (visible(nose)) {
-const headR = shoulderW * 0.20;
-const headY = nose.y - headR*0.48;
-
-ctx.beginPath();
-ctx.ellipse(nose.x, headY, headR*0.78, headR, 0, 0, Math.PI*2);
-const headGrad = ctx.createLinearGradient(
-nose.x-headR, headY, nose.x+headR, headY
-);
-headGrad.addColorStop(0, "#455a6d");
-headGrad.addColorStop(0.5, "#dceaf5");
-headGrad.addColorStop(1, "#536b7e");
-ctx.fillStyle = headGrad;
-ctx.fill();
-ctx.strokeStyle = "#263b4c";
-ctx.lineWidth = 3;
-ctx.stroke();
-
-// バイザー
-ctx.fillStyle = "#102433";
-ctx.fillRect(
-nose.x-headR*0.68,
-headY-headR*0.12,
-headR*1.36,
-headR*0.32
-);
-ctx.fillStyle = "#55f2ff";
-ctx.fillRect(
-nose.x-headR*0.48,
-headY-headR*0.02,
-headR*0.96,
-headR*0.07
-);
+// 肋骨：肩から腰までの範囲に描く
+for (let i = 1; i <= 5; i++) {
+const t = i / 6;
+const y = midS.y + (midH.y - midS.y) * t;
+const half = shoulderW * (0.43 - t * 0.16);
+const a = { x: midS.x-half, y, v: 1 };
+const b = { x: midS.x+half, y, v: 1 };
+const curveY = y + scale * 0.13;
+rib(a, b, midS.x, curveY, scale * 0.065);
 }
+
+// 骨盤
+bone(lh, rh, scale * 0.12);
+bone(lh, midH, scale * 0.07);
+bone(rh, midH, scale * 0.07);
+
+// 腕
+bone(ls, le, scale * 0.13);
+bone(le, lw, scale * 0.105);
+bone(rs, re, scale * 0.13);
+bone(re, rw, scale * 0.105);
+
+// 脚
+bone(lh, lk, scale * 0.16);
+bone(lk, la, scale * 0.13);
+bone(rh, rk, scale * 0.16);
+bone(rk, ra, scale * 0.13);
+
+// 足の骨
+bone(la, lheel, scale * 0.075);
+bone(ra, rheel, scale * 0.075);
+bone(la, lfoot, scale * 0.07);
+bone(ra, rfoot, scale * 0.07);
+
+// 緑色の領域だけに骨の描画を残す
+boneCtx.globalCompositeOperation = "destination-in";
+boneCtx.drawImage(maskCanvas, 0, 0, w, h);
+boneCtx.globalCompositeOperation = "source-over";
+
+ctx.drawImage(boneCanvas, 0, 0, w, h);
 
 return true;
 }
 
 function render() {
-if (!running) return;
-if (video.readyState >= 2 && video.currentTime !== lastTime) {
+if (!running || busy) return;
+
+if (video.readyState >= 2 &&
+video.currentTime !== lastTime) {
+busy = true;
 lastTime = video.currentTime;
 
-const w = video.videoWidth, h = video.videoHeight;
-if (w && h) {
-if (canvas.width !== w || canvas.height !== h) {
-canvas.width = w;
-canvas.height = h;
-}
+try {
+const w = video.videoWidth;
+const h = video.videoHeight;
 
+if (w && h) {
+setupCanvas(w, h);
+
+// 元の映像を表示
 ctx.drawImage(video, 0, 0, w, h);
 
-try {
-const result = pose.detectForVideo(video, performance.now());
+// 緑タイツの領域を抽出
+makeGreenMask(w, h);
+
+// 姿勢を検出して骨を重ねる
+const result = pose.detectForVideo(
+video, performance.now()
+);
 const landmarks = result.landmarks?.[0];
 
-if (landmarks && drawRobot(landmarks, w, h)) {
-status.textContent = "🤖 全身追跡中";
+if (landmarks &&
+drawSkeleton(landmarks, w, h)) {
+status.textContent =
+"💀 骨の模様を表示中｜緑タイツを映してね";
 } else {
-status.textContent = "全身が映るようにカメラを調整してね";
+status.textContent =
+"全身が映るようにカメラを調整してね";
+}
 }
 } catch (e) {
 console.error(e);
-status.textContent = "追跡処理でエラーが発生しました";
+status.textContent =
+"処理中にエラーが発生しました。再起動してください。";
+} finally {
+busy = false;
 }
-}
-}
-requestAnimationFrame(render);
 }
 
-document.getElementById("start").addEventListener("click", startCamera);
-document.getElementById("switch").addEventListener("click", async () => {
+if (running) requestAnimationFrame(render);
+}
+
+document.getElementById("start").addEventListener(
+"click", startCamera
+);
+
+document.getElementById("switch").addEventListener(
+"click", async () => {
 backCamera = !backCamera;
 await startCamera();
+}
+);
+
+window.addEventListener("pagehide", () => {
+running = false;
+if (stream) stream.getTracks().forEach(t => t.stop());
 });
 </script>
 </body>
